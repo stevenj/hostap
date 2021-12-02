@@ -1,0 +1,2 @@
+echo $1
+git apply -v ~/Development/privacy-hero/ph-openwrt/package/network/services/hostapd/patches/$1

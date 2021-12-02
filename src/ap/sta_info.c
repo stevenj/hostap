@@ -458,6 +458,7 @@ void ap_handle_timer(void *eloop_ctx, void *timeout_ctx)
 		hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
 			       HOSTAPD_LEVEL_INFO, "deauthenticated due to "
 			       "local deauth request");
+		hostapd_ubus_notify(hapd, "local-deauth", sta->addr);
 		ap_free_sta(hapd, sta);
 		return;
 	}
@@ -613,6 +614,7 @@ skip_poll:
 		mlme_deauthenticate_indication(
 			hapd, sta,
 			WLAN_REASON_PREV_AUTH_NOT_VALID);
+		hostapd_ubus_notify(hapd, "inactive-deauth", sta->addr);
 		ap_free_sta(hapd, sta);
 		break;
 	}
@@ -1329,6 +1331,7 @@ void ap_sta_set_authorized(struct hostapd_data *hapd, struct sta_info *sta,
 					  buf, ip_addr, keyid_buf);
 	} else {
 		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_DISCONNECTED "%s", buf);
+		hostapd_ubus_notify(hapd, "disassoc", sta->addr);
 
 		if (hapd->msg_ctx_parent &&
 		    hapd->msg_ctx_parent != hapd->msg_ctx)

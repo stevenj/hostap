@@ -15,6 +15,7 @@
 #include "utils/common.h"
 #include "utils/eloop.h"
 #include "utils/uuid.h"
+#include "utils/build_features.h"
 #include "crypto/random.h"
 #include "crypto/tls.h"
 #include "common/version.h"
@@ -38,6 +39,8 @@ struct hapd_global {
 };
 
 static struct hapd_global global;
+static int daemonize = 0;
+static char *pid_file = NULL;
 
 
 #ifndef CONFIG_NO_HOSTAPD_LOGGER
@@ -145,6 +148,14 @@ static void hostapd_logger_cb(void *ctx, const u8 *addr, unsigned int module,
 }
 #endif /* CONFIG_NO_HOSTAPD_LOGGER */
 
+static void hostapd_setup_complete_cb(void *ctx)
+{
+	if (daemonize && os_daemonize(pid_file)) {
+		perror("daemon");
+		return;
+	}
+	daemonize = 0;
+}
 
 /**
  * hostapd_driver_init - Preparate driver interface
@@ -162,6 +173,8 @@ static int hostapd_driver_init(struct hostapd_iface *iface)
 		wpa_printf(MSG_ERROR, "No hostapd driver wrapper available");
 		return -1;
 	}
+
+	hapd->setup_complete_cb = hostapd_setup_complete_cb;
 
 	/* Initialize the driver interface */
 	if (!(b[0] | b[1] | b[2] | b[3] | b[4] | b[5]))
@@ -304,7 +317,7 @@ static void handle_term(int sig, void *signal_ctx)
 
 static int handle_reload_iface(struct hostapd_iface *iface, void *ctx)
 {
-	if (hostapd_reload_config(iface) < 0) {
+	if (hostapd_reload_config(iface, 0) < 0) {
 		wpa_printf(MSG_WARNING, "Failed to read new configuration "
 			   "file - continuing with old.");
 	}
@@ -403,8 +416,6 @@ static void hostapd_global_deinit(const char *pid_file, int eloop_initialized)
 #endif /* CONFIG_NATIVE_WINDOWS */
 
 	eap_server_unregister_methods();
-
-	os_daemonize_terminate(pid_file);
 }
 
 
@@ -429,18 +440,6 @@ static int hostapd_global_run(struct hapd_interfaces *ifaces, int daemonize,
 		return -1;
 	}
 #endif /* EAP_SERVER_TNC */
-
-	if (daemonize) {
-		if (os_daemonize(pid_file)) {
-			wpa_printf(MSG_ERROR, "daemon: %s", strerror(errno));
-			return -1;
-		}
-		if (eloop_sock_requeue()) {
-			wpa_printf(MSG_ERROR, "eloop_sock_requeue: %s",
-				   strerror(errno));
-			return -1;
-		}
-	}
 
 	eloop_run();
 
@@ -590,6 +589,11 @@ fail:
 	return -1;
 }
 
+void hostapd_wpa_event(void *ctx, enum wpa_event_type event,
+                       union wpa_event_data *data);
+
+void hostapd_wpa_event_global(void *ctx, enum wpa_event_type event,
+ 				 union wpa_event_data *data);
 
 #ifdef CONFIG_WPS
 static int gen_uuid(const char *txt_addr)
@@ -639,8 +643,7 @@ int main(int argc, char *argv[])
 	struct hapd_interfaces interfaces;
 	int ret = 1;
 	size_t i, j;
-	int c, debug = 0, daemonize = 0;
-	char *pid_file = NULL;
+	int c, debug = 0;
 	const char *log_file = NULL;
 	const char *entropy_file = NULL;
 	char **bss_config = NULL, **tmp_bss;
@@ -683,8 +686,10 @@ int main(int argc, char *argv[])
 		return -1;
 #endif /* CONFIG_DPP */
 
+	wpa_supplicant_event = hostapd_wpa_event;
+	wpa_supplicant_event_global = hostapd_wpa_event_global;
 	for (;;) {
-		c = getopt(argc, argv, "b:Bde:f:hi:KP:sSTtu:vg:G:");
+		c = getopt(argc, argv, "b:Bde:f:hi:KP:sSTtu:g:G:v::");
 		if (c < 0)
 			break;
 		switch (c) {
@@ -721,6 +726,8 @@ int main(int argc, char *argv[])
 			break;
 #endif /* CONFIG_DEBUG_LINUX_TRACING */
 		case 'v':
+			if (optarg)
+				exit(!has_feature(optarg));
 			show_version();
 			exit(1);
 			break;
@@ -888,6 +895,7 @@ int main(int argc, char *argv[])
 	}
 
 	hostapd_global_ctrl_iface_init(&interfaces);
+	hostapd_ubus_add(&interfaces);
 
 	if (hostapd_global_run(&interfaces, daemonize, pid_file)) {
 		wpa_printf(MSG_ERROR, "Failed to start eloop");
@@ -897,6 +905,7 @@ int main(int argc, char *argv[])
 	ret = 0;
 
  out:
+	hostapd_ubus_free(&interfaces);
 	hostapd_global_ctrl_iface_deinit(&interfaces);
 	/* Deinitialize all interfaces */
 	for (i = 0; i < interfaces.count; i++) {

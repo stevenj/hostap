@@ -19,6 +19,7 @@
 
 #define WPA_SUPPLICANT_DRIVER_VERSION 4
 
+#include "ap/sta_info.h"
 #include "common/defs.h"
 #include "common/ieee802_11_defs.h"
 #include "common/wpa_common.h"
@@ -851,6 +852,9 @@ struct wpa_driver_associate_params {
 	 * responsible for selecting with which BSS to associate. */
 	const u8 *bssid;
 
+	unsigned char rates[WLAN_SUPP_RATES_MAX];
+	int mcast_rate;
+
 	/**
 	 * bssid_hint - BSSID of a proposed AP
 	 *
@@ -1584,6 +1588,7 @@ struct wpa_driver_mesh_bss_params {
 #define WPA_DRIVER_MESH_CONF_FLAG_MAX_PEER_LINKS	0x00000004
 #define WPA_DRIVER_MESH_CONF_FLAG_HT_OP_MODE		0x00000008
 #define WPA_DRIVER_MESH_CONF_FLAG_RSSI_THRESHOLD	0x00000010
+#define WPA_DRIVER_MESH_CONF_FLAG_FORWARDING		0x00000020
 	/*
 	 * TODO: Other mesh configuration parameters would go here.
 	 * See NL80211_MESHCONF_* for all the mesh config parameters.
@@ -1593,6 +1598,7 @@ struct wpa_driver_mesh_bss_params {
 	int peer_link_timeout;
 	int max_peer_links;
 	int rssi_threshold;
+	int forwarding;
 	u16 ht_opmode;
 };
 
@@ -1612,6 +1618,7 @@ struct wpa_driver_mesh_join_params {
 #define WPA_DRIVER_MESH_FLAG_AMPE	0x00000008
 	unsigned int flags;
 	bool handle_dfs;
+	int mcast_rate;
 };
 
 struct wpa_driver_set_key_params {
@@ -5827,6 +5834,7 @@ union wpa_event_data {
 
 	/**
 	 * struct ch_switch
+	 * @count: Count until channel switch activates
 	 * @freq: Frequency of new channel in MHz
 	 * @ht_enabled: Whether this is an HT channel
 	 * @ch_offset: Secondary channel offset
@@ -5835,6 +5843,7 @@ union wpa_event_data {
 	 * @cf2: Center frequency 2
 	 */
 	struct ch_switch {
+		int count;
 		int freq;
 		int ht_enabled;
 		int ch_offset;
@@ -6023,8 +6032,8 @@ union wpa_event_data {
  * Driver wrapper code should call this function whenever an event is received
  * from the driver.
  */
-void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
-			  union wpa_event_data *data);
+extern void (*wpa_supplicant_event)(void *ctx, enum wpa_event_type event,
+				    union wpa_event_data *data);
 
 /**
  * wpa_supplicant_event_global - Report a driver event for wpa_supplicant
@@ -6036,7 +6045,7 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
  * Same as wpa_supplicant_event(), but we search for the interface in
  * wpa_global.
  */
-void wpa_supplicant_event_global(void *ctx, enum wpa_event_type event,
+extern void (*wpa_supplicant_event_global)(void *ctx, enum wpa_event_type event,
 				 union wpa_event_data *data);
 
 /*

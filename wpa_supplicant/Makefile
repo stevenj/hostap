@@ -17,6 +17,7 @@ endif
 EXTRA_TARGETS=dynamic_eap_methods
 
 CONFIG_FILE=.config
+-include $(if $(MULTICALL),../hostapd/.config)
 include ../src/build.rules
 
 ifdef LIBS
@@ -107,6 +108,8 @@ OBJS_c += ../src/utils/common.o
 OBJS_c += ../src/common/cli.o
 OBJS += wmm_ac.o
 
+OBJS += ../src/common/wpa_ctrl.o
+
 ifndef CONFIG_OS
 ifdef CONFIG_NATIVE_WINDOWS
 CONFIG_OS=win32
@@ -171,6 +174,12 @@ endif
 
 ifdef CONFIG_EAPOL_TEST
 CFLAGS += -Werror -DEAPOL_TEST
+endif
+
+ifdef CONFIG_UBUS
+CFLAGS += -DUBUS_SUPPORT
+OBJS += ubus.o
+LIBS += -lubox -lubus
 endif
 
 ifdef CONFIG_CODE_COVERAGE
@@ -359,7 +368,9 @@ endif
 ifdef CONFIG_IBSS_RSN
 NEED_RSN_AUTHENTICATOR=y
 CFLAGS += -DCONFIG_IBSS_RSN
+ifndef MULTICALL
 CFLAGS += -DCONFIG_NO_VLAN
+endif
 OBJS += ibss_rsn.o
 endif
 
@@ -897,6 +908,10 @@ ifdef CONFIG_DYNAMIC_EAP_METHODS
 CFLAGS += -DCONFIG_DYNAMIC_EAP_METHODS
 LIBS += -ldl -rdynamic
 endif
+else
+  ifdef MULTICALL
+    OBJS += ../src/eap_common/eap_common.o
+  endif
 endif
 
 ifdef CONFIG_AP
@@ -904,9 +919,11 @@ NEED_EAP_COMMON=y
 NEED_RSN_AUTHENTICATOR=y
 CFLAGS += -DCONFIG_AP
 OBJS += ap.o
+ifndef MULTICALL
 CFLAGS += -DCONFIG_NO_RADIUS
 CFLAGS += -DCONFIG_NO_ACCOUNTING
 CFLAGS += -DCONFIG_NO_VLAN
+endif
 OBJS += ../src/ap/hostapd.o
 OBJS += ../src/ap/wpa_auth_glue.o
 OBJS += ../src/ap/utils.o
@@ -944,7 +961,13 @@ ifdef CONFIG_FILS
 OBJS += ../src/ap/fils_hlp.o
 endif
 ifdef CONFIG_CTRL_IFACE
+ifdef CONFIG_CTRL_IFACE_MIB
+CFLAGS += -DCONFIG_CTRL_IFACE_MIB
+endif
 OBJS += ../src/ap/ctrl_iface_ap.o
+ifdef CONFIG_UBUS
+OBJS += ../src/ap/ubus.o
+endif
 endif
 
 CFLAGS += -DEAP_SERVER -DEAP_SERVER_IDENTITY
@@ -986,6 +1009,12 @@ endif
 ifdef CONFIG_HS20
 OBJS += ../src/ap/hs20.o
 endif
+else
+  ifdef MULTICALL
+    OBJS += ../src/eap_server/eap_server.o
+    OBJS += ../src/eap_server/eap_server_identity.o
+    OBJS += ../src/eap_server/eap_server_methods.o
+  endif
 endif
 
 ifdef CONFIG_MBO
@@ -994,7 +1023,9 @@ CFLAGS += -DCONFIG_MBO
 endif
 
 ifdef NEED_RSN_AUTHENTICATOR
+ifndef MULTICALL
 CFLAGS += -DCONFIG_NO_RADIUS
+endif
 NEED_AES_WRAP=y
 OBJS += ../src/ap/wpa_auth.o
 OBJS += ../src/ap/wpa_auth_ie.o
@@ -1889,32 +1920,38 @@ wpa_priv: $(BCHECK) $(OBJS_priv)
 
 _OBJS_VAR := OBJS
 include ../src/objs.mk
+wpa_supplicant_multi.a: .config $(BCHECK) $(OBJS) $(EXTRA_progs)
+	$(Q)$(CC) -c -o wpa_supplicant_multi.o -Dmain=wpa_supplicant_main $(CFLAGS) main.c
+	@$(E) "  CC " $<
+	@rm -f $@
+	@$(AR) cr $@ wpa_supplicant_multi.o $(OBJS)
+
 wpa_supplicant: $(BCHECK) $(OBJS) $(EXTRA_progs)
-	$(Q)$(LDO) $(LDFLAGS) -o wpa_supplicant $(OBJS) $(LIBS) $(EXTRALIBS)
+	+$(Q)$(LDO) $(LDFLAGS) -o wpa_supplicant $(OBJS) $(LIBS) $(EXTRALIBS)
 	@$(E) "  LD " $@
 
 _OBJS_VAR := OBJS_t
 include ../src/objs.mk
 eapol_test: $(OBJS_t)
-	$(Q)$(LDO) $(LDFLAGS) -o eapol_test $(OBJS_t) $(LIBS)
+	+$(Q)$(LDO) $(LDFLAGS) -o eapol_test $(OBJS_t) $(LIBS)
 	@$(E) "  LD " $@
 
 _OBJS_VAR := OBJS_t2
 include ../src/objs.mk
 preauth_test: $(OBJS_t2)
-	$(Q)$(LDO) $(LDFLAGS) -o preauth_test $(OBJS_t2) $(LIBS)
+	+$(Q)$(LDO) $(LDFLAGS) -o preauth_test $(OBJS_t2) $(LIBS)
 	@$(E) "  LD " $@
 
 _OBJS_VAR := OBJS_p
 include ../src/objs.mk
 wpa_passphrase: $(OBJS_p)
-	$(Q)$(LDO) $(LDFLAGS) -o wpa_passphrase $(OBJS_p) $(LIBS_p) $(LIBS)
+	+$(Q)$(LDO) $(LDFLAGS) -o wpa_passphrase $(OBJS_p) $(LIBS_p) $(LIBS)
 	@$(E) "  LD " $@
 
 _OBJS_VAR := OBJS_c
 include ../src/objs.mk
 wpa_cli: $(OBJS_c)
-	$(Q)$(LDO) $(LDFLAGS) -o wpa_cli $(OBJS_c) $(LIBS_c)
+	+$(Q)$(LDO) $(LDFLAGS) -o wpa_cli $(OBJS_c) $(LIBS_c)
 	@$(E) "  LD " $@
 
 LIBCTRL += ../src/common/wpa_ctrl.o
@@ -2020,6 +2057,12 @@ eap_gpsk.so: $(SRC_EAP_GPSK)
 %@.service: %.service.arg.in
 	$(Q)sed -e 's|\@BINDIR\@|$(BINDIR)|g' $< >$@
 	@$(E) "  sed" $<
+
+dump_cflags:
+	@printf "%s " "$(CFLAGS)"
+
+dump_ldflags:
+	@printf "%s " "$(LDFLAGS) $(LIBS) $(EXTRALIBS)"
 
 wpa_supplicant.exe: wpa_supplicant
 	mv -f $< $@

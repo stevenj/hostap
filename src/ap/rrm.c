@@ -89,6 +89,9 @@ static void hostapd_handle_beacon_report(struct hostapd_data *hapd,
 		return;
 	wpa_msg(hapd->msg_ctx, MSG_INFO, BEACON_RESP_RX MACSTR " %u %02x %s",
 		MAC2STR(addr), token, rep_mode, report);
+	if (len < sizeof(struct rrm_measurement_beacon_report))
+		return;
+	hostapd_ubus_notify_beacon_report(hapd, addr, token, rep_mode, (struct rrm_measurement_beacon_report*) pos, len);
 }
 
 

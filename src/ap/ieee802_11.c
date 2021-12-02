@@ -3553,13 +3553,18 @@ static void handle_auth(struct hostapd_data *hapd,
 	u16 auth_alg, auth_transaction, status_code;
 	u16 resp = WLAN_STATUS_SUCCESS;
 	struct sta_info *sta = NULL;
-	int res, reply_res;
+	int res, reply_res, ubus_resp;
 	u16 fc;
 	const u8 *challenge = NULL;
 	u8 resp_ies[2 + WLAN_AUTH_CHALLENGE_LEN];
 	size_t resp_ies_len = 0;
 	u16 seq_ctrl;
 	struct radius_sta rad_info;
+	struct hostapd_ubus_request req = {
+		.type = HOSTAPD_UBUS_AUTH_REQ,
+		.mgmt_frame = mgmt,
+		.ssi_signal = rssi,
+	};
 
 	if (len < IEEE80211_HDRLEN + sizeof(mgmt->u.auth)) {
 		wpa_printf(MSG_INFO, "handle_auth - too short payload (len=%lu)",
@@ -3727,6 +3732,13 @@ static void handle_auth(struct hostapd_data *hapd,
 		resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
 		goto fail;
 	}
+	ubus_resp = hostapd_ubus_handle_event(hapd, &req);
+	if (ubus_resp) {
+		wpa_printf(MSG_DEBUG, "Station " MACSTR " rejected by ubus handler.\n",
+			MAC2STR(mgmt->sa));
+		resp = ubus_resp > 0 ? (u16) ubus_resp : WLAN_STATUS_UNSPECIFIED_FAILURE;
+		goto fail;
+	}
 	if (res == HOSTAPD_ACL_PENDING)
 		return;
 
@@ -3761,15 +3773,6 @@ static void handle_auth(struct hostapd_data *hapd,
 				       seq_ctrl);
 			return;
 		}
-#ifdef CONFIG_MESH
-		if ((hapd->conf->mesh & MESH_ENABLED) &&
-		    sta->plink_state == PLINK_BLOCKED) {
-			wpa_printf(MSG_DEBUG, "Mesh peer " MACSTR
-				   " is blocked - drop Authentication frame",
-				   MAC2STR(mgmt->sa));
-			return;
-		}
-#endif /* CONFIG_MESH */
 #ifdef CONFIG_PASN
 		if (auth_alg == WLAN_AUTH_PASN &&
 		    (sta->flags & WLAN_STA_ASSOC)) {
@@ -4124,13 +4127,11 @@ static u16 copy_supp_rates(struct hostapd_data *hapd, struct sta_info *sta,
 static u16 check_ext_capab(struct hostapd_data *hapd, struct sta_info *sta,
 			   const u8 *ext_capab_ie, size_t ext_capab_ie_len)
 {
-#ifdef CONFIG_INTERWORKING
 	/* check for QoS Map support */
 	if (ext_capab_ie_len >= 5) {
 		if (ext_capab_ie[4] & 0x01)
 			sta->qos_map_enabled = 1;
 	}
-#endif /* CONFIG_INTERWORKING */
 
 	if (ext_capab_ie_len > 0) {
 		sta->ecsa_supported = !!(ext_capab_ie[0] & BIT(2));
@@ -4942,6 +4943,13 @@ static int add_associated_sta(struct hostapd_data *hapd,
 	 * drivers to accept the STA parameter configuration. Since this is
 	 * after a new FT-over-DS exchange, a new TK has been derived, so key
 	 * reinstallation is not a concern for this case.
+	 *
+	 * If the STA was associated and authorized earlier, but came for a new
+	 * connection (!added_unassoc + !reassoc), remove the existing STA entry
+	 * so that it can be re-added. This case is rarely seen when the AP could
+	 * not receive the deauth/disassoc frame from the STA. And the STA comes
+	 * back with new connection within a short period or before the inactive
+	 * STA entry is removed from the list.
 	 */
 	wpa_printf(MSG_DEBUG, "Add associated STA " MACSTR
 		   " (added_unassoc=%d auth_alg=%u ft_over_ds=%u reassoc=%d authorized=%d ft_tk=%d fils_tk=%d)",
@@ -4955,7 +4963,8 @@ static int add_associated_sta(struct hostapd_data *hapd,
 	    (!(sta->flags & WLAN_STA_AUTHORIZED) ||
 	     (reassoc && sta->ft_over_ds && sta->auth_alg == WLAN_AUTH_FT) ||
 	     (!wpa_auth_sta_ft_tk_already_set(sta->wpa_sm) &&
-	      !wpa_auth_sta_fils_tk_already_set(sta->wpa_sm)))) {
+	      !wpa_auth_sta_fils_tk_already_set(sta->wpa_sm)) ||
+	     (!reassoc && (sta->flags & WLAN_STA_AUTHORIZED)))) {
 		hostapd_drv_sta_remove(hapd, sta->addr);
 		wpa_auth_sm_event(sta->wpa_sm, WPA_DRV_STA_REMOVED);
 		set = 0;
@@ -5446,7 +5455,7 @@ static void handle_assoc(struct hostapd_data *hapd,
 	int resp = WLAN_STATUS_SUCCESS;
 	u16 reply_res = WLAN_STATUS_UNSPECIFIED_FAILURE;
 	const u8 *pos;
-	int left, i;
+	int left, i, ubus_resp;
 	struct sta_info *sta;
 	u8 *tmp = NULL;
 #ifdef CONFIG_FILS
@@ -5659,6 +5668,11 @@ static void handle_assoc(struct hostapd_data *hapd,
 		left = res;
 	}
 #endif /* CONFIG_FILS */
+	struct hostapd_ubus_request req = {
+		.type = HOSTAPD_UBUS_ASSOC_REQ,
+		.mgmt_frame = mgmt,
+		.ssi_signal = rssi,
+	};
 
 	/* followed by SSID and Supported rates; and HT capabilities if 802.11n
 	 * is used */
@@ -5757,6 +5771,13 @@ static void handle_assoc(struct hostapd_data *hapd,
 	}
 #endif /* CONFIG_FILS */
 
+	ubus_resp = hostapd_ubus_handle_event(hapd, &req);
+	if (ubus_resp) {
+		wpa_printf(MSG_DEBUG, "Station " MACSTR " assoc rejected by ubus handler.\n",
+		       MAC2STR(mgmt->sa));
+		resp = ubus_resp > 0 ? (u16) ubus_resp : WLAN_STATUS_UNSPECIFIED_FAILURE;
+		goto fail;
+	}
  fail:
 
 	/*
@@ -5850,6 +5871,7 @@ static void handle_disassoc(struct hostapd_data *hapd,
 	wpa_printf(MSG_DEBUG, "disassocation: STA=" MACSTR " reason_code=%d",
 		   MAC2STR(mgmt->sa),
 		   le_to_host16(mgmt->u.disassoc.reason_code));
+	hostapd_ubus_notify(hapd, "disassoc", mgmt->sa);
 
 	sta = ap_get_sta(hapd, mgmt->sa);
 	if (sta == NULL) {
@@ -5918,6 +5940,8 @@ static void handle_deauth(struct hostapd_data *hapd,
 
 	/* Clear the PTKSA cache entries for PASN */
 	ptksa_cache_flush(hapd->ptksa, mgmt->sa, WPA_CIPHER_NONE);
+
+	hostapd_ubus_notify(hapd, "deauth", mgmt->sa);
 
 	sta = ap_get_sta(hapd, mgmt->sa);
 	if (sta == NULL) {

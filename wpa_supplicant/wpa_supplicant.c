@@ -130,6 +130,54 @@ static void wpas_update_fils_connect_params(struct wpa_supplicant *wpa_s);
 static void wpas_update_owe_connect_params(struct wpa_supplicant *wpa_s);
 #endif /* CONFIG_OWE */
 
+static int hostapd_stop(struct wpa_supplicant *wpa_s)
+{
+	const char *cmd = "STOP_AP";
+	char buf[256];
+	size_t len = sizeof(buf);
+
+	if (wpa_ctrl_request(wpa_s->hostapd, cmd, os_strlen(cmd), buf, &len, NULL) < 0) {
+		wpa_printf(MSG_ERROR, "\nFailed to stop hostapd AP interfaces\n");
+		return -1;
+	}
+	return 0;
+}
+
+static int hostapd_reload(struct wpa_supplicant *wpa_s, struct wpa_bss *bss)
+{
+	char *cmd = NULL;
+	char buf[256];
+	size_t len = sizeof(buf);
+	enum hostapd_hw_mode hw_mode;
+	u8 channel;
+	int sec_chan = 0;
+	int ret;
+
+	if (!bss)
+		return -1;
+
+	if (bss->ht_param & HT_INFO_HT_PARAM_STA_CHNL_WIDTH) {
+		int sec = bss->ht_param & HT_INFO_HT_PARAM_SECONDARY_CHNL_OFF_MASK;
+		if (sec == HT_INFO_HT_PARAM_SECONDARY_CHNL_ABOVE)
+			sec_chan = 1;
+		else if (sec ==  HT_INFO_HT_PARAM_SECONDARY_CHNL_BELOW)
+			sec_chan = -1;
+	}
+
+	hw_mode = ieee80211_freq_to_chan(bss->freq, &channel);
+	if (asprintf(&cmd, "UPDATE channel=%d sec_chan=%d hw_mode=%d",
+		     channel, sec_chan, hw_mode) < 0)
+		return -1;
+
+	ret = wpa_ctrl_request(wpa_s->hostapd, cmd, os_strlen(cmd), buf, &len, NULL);
+	free(cmd);
+
+	if (ret < 0) {
+		wpa_printf(MSG_ERROR, "\nFailed to reload hostapd AP interfaces\n");
+		return -1;
+	}
+	return 0;
+}
 
 #ifdef CONFIG_WEP
 /* Configure default/group WEP keys for static WEP */
@@ -1007,6 +1055,8 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 
 		sme_sched_obss_scan(wpa_s, 1);
 
+		if (wpa_s->hostapd)
+			hostapd_reload(wpa_s, wpa_s->current_bss);
 #if defined(CONFIG_FILS) && defined(IEEE8021X_EAPOL)
 		if (!fils_hlp_sent && ssid && ssid->eap.erp)
 			update_fils_connect_params = true;
@@ -1017,6 +1067,8 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_OWE */
 	} else if (state == WPA_DISCONNECTED || state == WPA_ASSOCIATING ||
 		   state == WPA_ASSOCIATED) {
+		if (wpa_s->hostapd)
+			hostapd_stop(wpa_s);
 		wpa_s->new_connection = 1;
 		wpa_drv_set_operstate(wpa_s, 0);
 #ifndef IEEE8021X_EAPOL
@@ -2276,6 +2328,8 @@ void wpa_supplicant_associate(struct wpa_supplicant *wpa_s,
 			return;
 		}
 		wpa_s->current_bss = bss;
+		if (wpa_s->hostapd)
+			hostapd_reload(wpa_s, wpa_s->current_bss);
 #else /* CONFIG_MESH */
 		wpa_msg(wpa_s, MSG_ERROR,
 			"mesh mode support not included in the build");
@@ -2384,28 +2438,32 @@ void ibss_mesh_setup_freq(struct wpa_supplicant *wpa_s,
 	int ieee80211_mode = wpas_mode_to_ieee80211_mode(ssid->mode);
 	enum hostapd_hw_mode hw_mode;
 	struct hostapd_hw_modes *mode = NULL;
-	int ht40plus[] = { 36, 44, 52, 60, 100, 108, 116, 124, 132, 149, 157,
+	int ht40plus[] = { 1, 2, 3, 4, 5, 6, 36, 44, 52, 60, 100, 108, 116, 124, 132, 149, 157,
 			   184, 192 };
 	int vht80[] = { 36, 52, 100, 116, 132, 149 };
 	struct hostapd_channel_data *pri_chan = NULL, *sec_chan = NULL;
 	u8 channel;
-	int i, chan_idx, ht40 = -1, res, obss_scan = 1;
+	int i, chan_idx, ht40 = -1, res, obss_scan = !(ssid->noscan);
 	unsigned int j, k;
 	struct hostapd_freq_params vht_freq;
 	int chwidth, seg0, seg1;
 	u32 vht_caps = 0;
 	int is_24ghz;
+	int dfs_enabled = wpa_s->conf->country[0] &&
+			 (wpa_s->drv_flags & WPA_DRIVER_FLAGS_RADAR);
 
 	freq->freq = ssid->frequency;
 
 	for (j = 0; j < wpa_s->last_scan_res_used; j++) {
 		struct wpa_bss *bss = wpa_s->last_scan_res[j];
 
-		if (ssid->mode != WPAS_MODE_IBSS)
-			break;
-
 		/* Don't adjust control freq in case of fixed_freq */
-		if (ssid->fixed_freq)
+		if (ssid->fixed_freq) {
+			obss_scan = 0;
+			break;
+		}
+
+		if (ssid->mode != WPAS_MODE_IBSS)
 			break;
 
 		if (!bss_is_ibss(bss))
@@ -2471,7 +2529,7 @@ void ibss_mesh_setup_freq(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_HE_OVERRIDES */
 
 	/* Setup higher BW only for 5 GHz */
-	if (mode->mode != HOSTAPD_MODE_IEEE80211A)
+	if (mode->mode != HOSTAPD_MODE_IEEE80211A && !(ssid->noscan))
 		return;
 
 	for (chan_idx = 0; chan_idx < mode->num_channels; chan_idx++) {
@@ -2484,8 +2542,11 @@ void ibss_mesh_setup_freq(struct wpa_supplicant *wpa_s,
 		return;
 
 	/* Check primary channel flags */
-	if (pri_chan->flag & (HOSTAPD_CHAN_DISABLED | HOSTAPD_CHAN_NO_IR))
+	if (pri_chan->flag & HOSTAPD_CHAN_DISABLED)
 		return;
+	if (pri_chan->flag & (HOSTAPD_CHAN_RADAR | HOSTAPD_CHAN_NO_IR))
+		if (!dfs_enabled)
+			return;
 
 	freq->channel = pri_chan->chan;
 
@@ -2518,8 +2579,11 @@ void ibss_mesh_setup_freq(struct wpa_supplicant *wpa_s,
 		return;
 
 	/* Check secondary channel flags */
-	if (sec_chan->flag & (HOSTAPD_CHAN_DISABLED | HOSTAPD_CHAN_NO_IR))
+	if (sec_chan->flag & HOSTAPD_CHAN_DISABLED)
 		return;
+	if (sec_chan->flag & (HOSTAPD_CHAN_RADAR | HOSTAPD_CHAN_NO_IR))
+		if (!dfs_enabled)
+			return;
 
 	if (ht40 == -1) {
 		if (!(pri_chan->flag & HOSTAPD_CHAN_HT40MINUS))
@@ -2612,8 +2676,11 @@ skip_ht40:
 			return;
 
 		/* Back to HT configuration if channel not usable */
-		if (chan->flag & (HOSTAPD_CHAN_DISABLED | HOSTAPD_CHAN_NO_IR))
+		if (chan->flag & HOSTAPD_CHAN_DISABLED)
 			return;
+		if (chan->flag & (HOSTAPD_CHAN_RADAR | HOSTAPD_CHAN_NO_IR))
+			if (!dfs_enabled)
+				return;
 	}
 
 	chwidth = CHANWIDTH_80MHZ;
@@ -2633,10 +2700,12 @@ skip_ht40:
 				if (!chan)
 					continue;
 
-				if (chan->flag & (HOSTAPD_CHAN_DISABLED |
-						  HOSTAPD_CHAN_NO_IR |
-						  HOSTAPD_CHAN_RADAR))
+				if (chan->flag & HOSTAPD_CHAN_DISABLED)
 					continue;
+				if (chan->flag & (HOSTAPD_CHAN_RADAR |
+						  HOSTAPD_CHAN_NO_IR))
+					if (!dfs_enabled)
+						continue;
 
 				/* Found a suitable second segment for 80+80 */
 				chwidth = CHANWIDTH_80P80MHZ;
@@ -3659,6 +3728,12 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 			params.beacon_int = ssid->beacon_int;
 		else
 			params.beacon_int = wpa_s->conf->beacon_int;
+		int i = 0;
+		while (i < WLAN_SUPP_RATES_MAX) {
+			params.rates[i] = ssid->rates[i];
+			i++;
+		}
+		params.mcast_rate = ssid->mcast_rate;
 	}
 
 	if (bss && ssid->enable_edmg)
@@ -5141,7 +5216,7 @@ wpa_supplicant_alloc(struct wpa_supplicant *parent)
 	if (wpa_s == NULL)
 		return NULL;
 	wpa_s->scan_req = INITIAL_SCAN_REQ;
-	wpa_s->scan_interval = 5;
+	wpa_s->scan_interval = 1;
 	wpa_s->new_connection = 1;
 	wpa_s->parent = parent ? parent : wpa_s;
 	wpa_s->p2pdev = wpa_s->parent;
@@ -6413,6 +6488,16 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 			   sizeof(wpa_s->bridge_ifname));
 	}
 
+	if (iface->hostapd_ctrl) {
+		wpa_s->hostapd = wpa_ctrl_open(iface->hostapd_ctrl);
+		if (!wpa_s->hostapd) {
+			wpa_printf(MSG_ERROR, "\nFailed to connect to hostapd\n");
+			return -1;
+		}
+		if (hostapd_stop(wpa_s) < 0)
+			return -1;
+	}
+
 	/* RSNA Supplicant Key Management - INITIALIZE */
 	eapol_sm_notify_portEnabled(wpa_s->eapol, false);
 	eapol_sm_notify_portValid(wpa_s->eapol, false);
@@ -6750,6 +6835,11 @@ static void wpa_supplicant_deinit_iface(struct wpa_supplicant *wpa_s,
 	if (terminate)
 		wpa_msg(wpa_s, MSG_INFO, WPA_EVENT_TERMINATING);
 
+	if (wpa_s->hostapd) {
+		wpa_ctrl_close(wpa_s->hostapd);
+		wpa_s->hostapd = NULL;
+	}
+
 	wpa_supplicant_ctrl_iface_deinit(wpa_s, wpa_s->ctrl_iface);
 	wpa_s->ctrl_iface = NULL;
 
@@ -6806,7 +6896,6 @@ struct wpa_interface * wpa_supplicant_match_iface(struct wpa_global *global,
 	return NULL;
 }
 
-
 /**
  * wpa_supplicant_match_existing - Match existing interfaces
  * @global: Pointer to global data from wpa_supplicant_init()
@@ -6841,6 +6930,11 @@ static int wpa_supplicant_match_existing(struct wpa_global *global)
 
 #endif /* CONFIG_MATCH_IFACE */
 
+extern void supplicant_event(void *ctx, enum wpa_event_type event,
+			     union wpa_event_data *data);
+
+extern void supplicant_event_global(void *ctx, enum wpa_event_type event,
+ 				 union wpa_event_data *data);
 
 /**
  * wpa_supplicant_add_iface - Add a new network interface
@@ -6923,6 +7017,8 @@ struct wpa_supplicant * wpa_supplicant_add_iface(struct wpa_global *global,
 	}
 #endif /* CONFIG_P2P */
 
+	wpas_ubus_add_bss(wpa_s);
+
 	return wpa_s;
 }
 
@@ -6948,6 +7044,8 @@ int wpa_supplicant_remove_iface(struct wpa_global *global,
 	char *ifname = NULL;
 	struct wpa_supplicant *parent = wpa_s->parent;
 #endif /* CONFIG_MESH */
+
+	wpas_ubus_free_bss(wpa_s);
 
 	/* Remove interface from the global list of interfaces */
 	prev = global->ifaces;
@@ -7097,6 +7195,8 @@ struct wpa_global * wpa_supplicant_init(struct wpa_params *params)
 #ifndef CONFIG_NO_WPA_MSG
 	wpa_msg_register_ifname_cb(wpa_supplicant_msg_ifname_cb);
 #endif /* CONFIG_NO_WPA_MSG */
+	wpa_supplicant_event = supplicant_event;
+	wpa_supplicant_event_global = supplicant_event_global;
 
 	if (params->wpa_debug_file_path)
 		wpa_debug_open_file(params->wpa_debug_file_path);
@@ -7250,7 +7350,11 @@ int wpa_supplicant_run(struct wpa_global *global)
 	eloop_register_signal_terminate(wpa_supplicant_terminate, global);
 	eloop_register_signal_reconfig(wpa_supplicant_reconfig, global);
 
+	wpas_ubus_add(global);
+
 	eloop_run();
+
+	wpas_ubus_free(global);
 
 	return 0;
 }

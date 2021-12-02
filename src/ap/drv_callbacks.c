@@ -145,6 +145,10 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 	u16 reason = WLAN_REASON_UNSPECIFIED;
 	int status = WLAN_STATUS_SUCCESS;
 	const u8 *p2p_dev_addr = NULL;
+	struct hostapd_ubus_request req = {
+		.type = HOSTAPD_UBUS_ASSOC_REQ,
+		.addr = addr,
+	};
 
 	if (addr == NULL) {
 		/*
@@ -237,6 +241,12 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 		goto fail;
 	}
 
+	if (hostapd_ubus_handle_event(hapd, &req)) {
+		wpa_printf(MSG_DEBUG, "Station " MACSTR " assoc rejected by ubus handler.\n",
+			   MAC2STR(req.addr));
+		goto fail;
+	}
+
 #ifdef CONFIG_P2P
 	if (elems.p2p) {
 		wpabuf_free(sta->p2p_ie);
@@ -261,12 +271,10 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 	}
 #endif /* NEED_AP_MLME */
 
-#ifdef CONFIG_INTERWORKING
 	if (elems.ext_capab && elems.ext_capab_len > 4) {
 		if (elems.ext_capab[4] & 0x01)
 			sta->qos_map_enabled = 1;
 	}
-#endif /* CONFIG_INTERWORKING */
 
 #ifdef CONFIG_HS20
 	wpabuf_free(sta->hs20_ie);
@@ -1836,8 +1844,8 @@ err:
 #endif /* CONFIG_OWE */
 
 
-void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
-			  union wpa_event_data *data)
+void hostapd_wpa_event(void *ctx, enum wpa_event_type event,
+		       union wpa_event_data *data)
 {
 	struct hostapd_data *hapd = ctx;
 #ifndef CONFIG_NO_STDOUT_DEBUG
@@ -2082,7 +2090,7 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 }
 
 
-void wpa_supplicant_event_global(void *ctx, enum wpa_event_type event,
+void hostapd_wpa_event_global(void *ctx, enum wpa_event_type event,
 				 union wpa_event_data *data)
 {
 	struct hapd_interfaces *interfaces = ctx;

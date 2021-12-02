@@ -140,6 +140,7 @@ static struct mesh_conf * mesh_config_create(struct wpa_supplicant *wpa_s,
 	conf->mesh_cc_id = 0;
 	conf->mesh_sp_id = MESH_SYNC_METHOD_NEIGHBOR_OFFSET;
 	conf->mesh_auth_id = (conf->security & MESH_CONF_SEC_AUTH) ? 1 : 0;
+	conf->mesh_fwding = ssid->mesh_fwding;
 	conf->dot11MeshMaxRetries = ssid->dot11MeshMaxRetries;
 	conf->dot11MeshRetryTimeout = ssid->dot11MeshRetryTimeout;
 	conf->dot11MeshConfirmTimeout = ssid->dot11MeshConfirmTimeout;
@@ -441,6 +442,7 @@ static int wpa_supplicant_mesh_init(struct wpa_supplicant *wpa_s,
 	bss->conf->start_disabled = 1;
 	bss->conf->mesh = MESH_ENABLED;
 	bss->conf->ap_max_inactivity = wpa_s->conf->mesh_max_inactivity;
+	bss->conf->mesh_fwding = wpa_s->conf->mesh_fwding;
 
 	if (ieee80211_is_dfs(ssid->frequency, wpa_s->hw.modes,
 			     wpa_s->hw.num_modes) && wpa_s->conf->country[0]) {
@@ -472,6 +474,8 @@ static int wpa_supplicant_mesh_init(struct wpa_supplicant *wpa_s,
 			   frequency);
 		goto out_free;
 	}
+	if (ssid->noscan)
+		conf->noscan = 1;
 
 	if (ssid->mesh_basic_rates == NULL) {
 		/*
@@ -596,6 +600,7 @@ int wpa_supplicant_join_mesh(struct wpa_supplicant *wpa_s,
 
 	params->meshid = ssid->ssid;
 	params->meshid_len = ssid->ssid_len;
+	params->mcast_rate = ssid->mcast_rate;
 	ibss_mesh_setup_freq(wpa_s, ssid, &params->freq);
 	wpa_s->mesh_ht_enabled = !!params->freq.ht_enabled;
 	wpa_s->mesh_vht_enabled = !!params->freq.vht_enabled;
@@ -654,6 +659,10 @@ int wpa_supplicant_join_mesh(struct wpa_supplicant *wpa_s,
 		params->conf.auto_plinks = 1;
 	}
 	params->conf.peer_link_timeout = wpa_s->conf->mesh_max_inactivity;
+
+	/* always explicitely set forwarding to on or off for now */
+	params->conf.flags |= WPA_DRIVER_MESH_CONF_FLAG_FORWARDING;
+	params->conf.forwarding = ssid->mesh_fwding;
 
 	os_free(wpa_s->mesh_params);
 	wpa_s->mesh_params = params;

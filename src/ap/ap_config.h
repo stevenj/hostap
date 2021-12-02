@@ -51,6 +51,7 @@ struct mesh_conf {
 	int dot11MeshRetryTimeout; /* msec */
 	int dot11MeshConfirmTimeout; /* msec */
 	int dot11MeshHoldingTimeout; /* msec */
+	int mesh_fwding;
 };
 
 #define MAX_STA_COUNT 2007
@@ -114,6 +115,7 @@ struct hostapd_ssid {
 #define DYNAMIC_VLAN_OPTIONAL 1
 #define DYNAMIC_VLAN_REQUIRED 2
 	int dynamic_vlan;
+	int vlan_no_bridge;
 #define DYNAMIC_VLAN_NAMING_WITHOUT_DEVICE 0
 #define DYNAMIC_VLAN_NAMING_WITH_DEVICE 1
 #define DYNAMIC_VLAN_NAMING_END 2
@@ -275,8 +277,12 @@ struct airtime_sta_weight {
 struct hostapd_bss_config {
 	char iface[IFNAMSIZ + 1];
 	char bridge[IFNAMSIZ + 1];
+	char ft_iface[IFNAMSIZ + 1];
+	char snoop_iface[IFNAMSIZ + 1];
 	char vlan_bridge[IFNAMSIZ + 1];
 	char wds_bridge[IFNAMSIZ + 1];
+
+	char *config_id;
 
 	enum hostapd_logger_level logger_syslog_level, logger_stdout_level;
 
@@ -696,6 +702,7 @@ struct hostapd_bss_config {
 
 #define MESH_ENABLED BIT(0)
 	int mesh;
+	int mesh_fwding;
 
 	u8 radio_measurements[RRM_CAPABILITIES_IE_LEN];
 
@@ -936,6 +943,7 @@ struct spatial_reuse {
 struct hostapd_config {
 	struct hostapd_bss_config **bss, *last_bss;
 	size_t num_bss;
+	char *config_id;
 
 	u16 beacon_int;
 	int rts_threshold;
@@ -969,6 +977,8 @@ struct hostapd_config {
 
 	unsigned int track_sta_max_num;
 	unsigned int track_sta_max_age;
+
+	int max_num_sta;
 
 	char country[3]; /* first two octets: country code as described in
 			  * ISO/IEC 3166-1. Third octet:
@@ -1007,6 +1017,8 @@ struct hostapd_config {
 
 	int ht_op_mode_fixed;
 	u16 ht_capab;
+	int noscan;
+	int no_ht_coex;
 	int ieee80211n;
 	int secondary_channel;
 	int no_pri_sec_switch;

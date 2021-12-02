@@ -265,6 +265,7 @@ static void hostapd_wpa_auth_psk_failure_report(void *ctx, const u8 *addr)
 	struct hostapd_data *hapd = ctx;
 	wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR,
 		MAC2STR(addr));
+	hostapd_ubus_notify(hapd, "key-mismatch", addr);
 }
 
 
@@ -1564,8 +1565,12 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 	    wpa_key_mgmt_ft(hapd->conf->wpa_key_mgmt)) {
 		const char *ft_iface;
 
-		ft_iface = hapd->conf->bridge[0] ? hapd->conf->bridge :
-			   hapd->conf->iface;
+		if (hapd->conf->ft_iface[0])
+			ft_iface = hapd->conf->ft_iface;
+		else if (hapd->conf->bridge[0])
+			ft_iface = hapd->conf->bridge;
+		else
+			ft_iface = hapd->conf->iface;
 		hapd->l2 = l2_packet_init(ft_iface, NULL, ETH_P_RRB,
 					  hostapd_rrb_receive, hapd, 1);
 		if (!hapd->l2) {

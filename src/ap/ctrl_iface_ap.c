@@ -25,6 +25,7 @@
 #include "mbo_ap.h"
 #include "taxonomy.h"
 
+#ifdef CONFIG_CTRL_IFACE_MIB
 
 static size_t hostapd_write_ht_mcs_bitmask(char *buf, size_t buflen,
 					   size_t curr_len, const u8 *mcs_set)
@@ -451,6 +452,7 @@ int hostapd_ctrl_iface_sta_next(struct hostapd_data *hapd, const char *txtaddr,
 	return hostapd_ctrl_iface_sta_mib(hapd, sta->next, buf, buflen);
 }
 
+#endif
 
 #ifdef CONFIG_P2P_MANAGER
 static int p2p_manager_disconnect(struct hostapd_data *hapd, u16 stype,
@@ -807,12 +809,12 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 			return len;
 		len += ret;
 	}
-
+#ifdef CONFIG_CTRL_IFACE_MIB
 	if (iface->conf->ieee80211n && !hapd->conf->disable_11n && mode) {
 		len = hostapd_write_ht_mcs_bitmask(buf, buflen, len,
 						   mode->mcs_set);
 	}
-
+#endif /* CONFIG_CTRL_IFACE_MIB */
 	if (iface->current_rates && iface->num_rates) {
 		ret = os_snprintf(buf + len, buflen - len, "supported_rates=");
 		if (os_snprintf_error(buflen - len, ret))
@@ -919,7 +921,13 @@ int hostapd_parse_csa_settings(const char *pos,
 
 int hostapd_ctrl_iface_stop_ap(struct hostapd_data *hapd)
 {
-	return hostapd_drv_stop_ap(hapd);
+	struct hostapd_iface *iface = hapd->iface;
+	int i;
+
+	for (i = 0; i < iface->num_bss; i++)
+		hostapd_drv_stop_ap(iface->bss[i]);
+
+	return 0;
 }
 
 

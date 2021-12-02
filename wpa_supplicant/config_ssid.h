@@ -10,8 +10,10 @@
 #define CONFIG_SSID_H
 
 #include "common/defs.h"
+#include "ap/sta_info.h"
 #include "utils/list.h"
 #include "eap_peer/eap_config.h"
+#include "drivers/nl80211_copy.h"
 
 
 #define DEFAULT_EAP_WORKAROUND ((unsigned int) -1)
@@ -546,6 +548,11 @@ struct wpa_ssid {
 	int dot11MeshConfirmTimeout; /* msec */
 	int dot11MeshHoldingTimeout; /* msec */
 
+	/**
+	 * Mesh network layer-2 forwarding
+	 */
+	int mesh_fwding;
+
 	int ht;
 	int ht40;
 
@@ -838,6 +845,9 @@ struct wpa_ssid {
 	 */
 	void *parent_cred;
 
+	unsigned char rates[WLAN_SUPP_RATES_MAX];
+	double mcast_rate;
+
 #ifdef CONFIG_MACSEC
 	/**
 	 * macsec_policy - Determines the policy for MACsec secure session
@@ -965,6 +975,8 @@ struct wpa_ssid {
 	 * this MBSS will trigger a peering attempt.
 	 */
 	int no_auto_peer;
+
+	int noscan;
 
 	/**
 	 * mesh_rssi_threshold - Set mesh parameter mesh_rssi_threshold (dBm)

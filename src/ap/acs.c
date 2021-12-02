@@ -302,18 +302,12 @@ static void acs_fail(struct hostapd_iface *iface)
 static long double
 acs_survey_interference_factor(struct freq_survey *survey, s8 min_nf)
 {
-	long double factor, busy, total;
+	long double factor, busy = 0, total;
 
 	if (survey->filled & SURVEY_HAS_CHAN_TIME_BUSY)
 		busy = survey->channel_time_busy;
 	else if (survey->filled & SURVEY_HAS_CHAN_TIME_RX)
 		busy = survey->channel_time_rx;
-	else {
-		/* This shouldn't really happen as survey data is checked in
-		 * acs_sanity_check() */
-		wpa_printf(MSG_ERROR, "ACS: Survey data missing");
-		return 0;
-	}
 
 	total = survey->channel_time;
 
@@ -392,7 +386,7 @@ static int acs_usable_bw40_chan(const struct hostapd_channel_data *chan)
 
 static int acs_usable_bw80_chan(const struct hostapd_channel_data *chan)
 {
-	const int allowed[] = { 5180, 5260, 5550, 5580, 5660, 5745, 5955, 6035,
+	const int allowed[] = { 5180, 5260, 5500, 5580, 5660, 5745, 5955, 6035,
 				6115, 6195, 6275, 6355, 6435, 6515, 6595, 6675,
 				6755, 6835, 6915, 6995 };
 	unsigned int i;
@@ -422,20 +416,19 @@ static int acs_usable_bw160_chan(const struct hostapd_channel_data *chan)
 static int acs_survey_is_sufficient(struct freq_survey *survey)
 {
 	if (!(survey->filled & SURVEY_HAS_NF)) {
+		survey->nf = -95;
 		wpa_printf(MSG_INFO, "ACS: Survey is missing noise floor");
-		return 0;
 	}
 
 	if (!(survey->filled & SURVEY_HAS_CHAN_TIME)) {
+		survey->channel_time = 0;
 		wpa_printf(MSG_INFO, "ACS: Survey is missing channel time");
-		return 0;
 	}
 
 	if (!(survey->filled & SURVEY_HAS_CHAN_TIME_BUSY) &&
 	    !(survey->filled & SURVEY_HAS_CHAN_TIME_RX)) {
 		wpa_printf(MSG_INFO,
 			   "ACS: Survey is missing RX and busy time (at least one is required)");
-		return 0;
 	}
 
 	return 1;

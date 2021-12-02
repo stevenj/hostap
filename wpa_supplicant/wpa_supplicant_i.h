@@ -19,6 +19,7 @@
 #include "wps/wps_defs.h"
 #include "config_ssid.h"
 #include "wmm_ac.h"
+#include "ubus.h"
 
 extern const char *const wpa_supplicant_version;
 extern const char *const wpa_supplicant_license;
@@ -101,6 +102,11 @@ struct wpa_interface {
 	 * ifname - Interface name
 	 */
 	const char *ifname;
+
+	/**
+	 * hostapd_ctrl - path to hostapd control socket for notification
+	 */
+	const char *hostapd_ctrl;
 
 	/**
 	 * bridge_ifname - Optional bridge interface name
@@ -316,6 +322,8 @@ struct wpa_global {
 #endif /* CONFIG_WIFI_DISPLAY */
 
 	struct psk_list_entry *add_psk; /* From group formation */
+
+	struct ubus_object ubus_global;
 };
 
 
@@ -600,6 +608,7 @@ struct wpa_supplicant {
 	unsigned char own_addr[ETH_ALEN];
 	unsigned char perm_addr[ETH_ALEN];
 	char ifname[100];
+	struct wpas_ubus_bss ubus;
 #ifdef CONFIG_MATCH_IFACE
 	int matched;
 #endif /* CONFIG_MATCH_IFACE */
@@ -614,6 +623,8 @@ struct wpa_supplicant {
 	const void *binder_object_key;
 #endif /* CONFIG_CTRL_IFACE_BINDER */
 	char bridge_ifname[16];
+
+	struct wpa_ctrl *hostapd;
 
 	char *confname;
 	char *confanother;

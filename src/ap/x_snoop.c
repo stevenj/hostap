@@ -31,14 +31,16 @@ int x_snoop_init(struct hostapd_data *hapd)
 		return -1;
 	}
 
-	if (hostapd_drv_br_port_set_attr(hapd, DRV_BR_PORT_ATTR_HAIRPIN_MODE,
+	if (!conf->snoop_iface[0] &&
+	    hostapd_drv_br_port_set_attr(hapd, DRV_BR_PORT_ATTR_HAIRPIN_MODE,
 					 1)) {
 		wpa_printf(MSG_DEBUG,
 			   "x_snoop: Failed to enable hairpin_mode on the bridge port");
 		return -1;
 	}
 
-	if (hostapd_drv_br_port_set_attr(hapd, DRV_BR_PORT_ATTR_PROXYARP, 1)) {
+	if (!conf->snoop_iface[0] &&
+	    hostapd_drv_br_port_set_attr(hapd, DRV_BR_PORT_ATTR_PROXYARP, 1)) {
 		wpa_printf(MSG_DEBUG,
 			   "x_snoop: Failed to enable proxyarp on the bridge port");
 		return -1;
@@ -52,7 +54,8 @@ int x_snoop_init(struct hostapd_data *hapd)
 	}
 
 #ifdef CONFIG_IPV6
-	if (hostapd_drv_br_set_net_param(hapd, DRV_BR_MULTICAST_SNOOPING, 1)) {
+	if (!conf->snoop_iface[0] &&
+	    hostapd_drv_br_set_net_param(hapd, DRV_BR_MULTICAST_SNOOPING, 1)) {
 		wpa_printf(MSG_DEBUG,
 			   "x_snoop: Failed to enable multicast snooping on the bridge");
 		return -1;
@@ -71,8 +74,12 @@ x_snoop_get_l2_packet(struct hostapd_data *hapd,
 {
 	struct hostapd_bss_config *conf = hapd->conf;
 	struct l2_packet_data *l2;
+	const char *ifname = conf->bridge;
 
-	l2 = l2_packet_init(conf->bridge, NULL, ETH_P_ALL, handler, hapd, 1);
+	if (conf->snoop_iface[0])
+		ifname = conf->snoop_iface;
+
+	l2 = l2_packet_init(ifname, NULL, ETH_P_ALL, handler, hapd, 1);
 	if (l2 == NULL) {
 		wpa_printf(MSG_DEBUG,
 			   "x_snoop: Failed to initialize L2 packet processing %s",

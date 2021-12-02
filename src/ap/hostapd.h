@@ -17,6 +17,7 @@
 #include "utils/list.h"
 #include "ap_config.h"
 #include "drivers/driver.h"
+#include "ubus.h"
 
 #define OCE_STA_CFON_ENABLED(hapd) \
 	((hapd->conf->oce & OCE_STA_CFON) && \
@@ -45,7 +46,7 @@ struct mesh_conf;
 struct hostapd_iface;
 
 struct hapd_interfaces {
-	int (*reload_config)(struct hostapd_iface *iface);
+	int (*reload_config)(struct hostapd_iface *iface, int reconf);
 	struct hostapd_config * (*config_read_cb)(const char *config_fname);
 	int (*ctrl_iface_init)(struct hostapd_data *hapd);
 	void (*ctrl_iface_deinit)(struct hostapd_data *hapd);
@@ -80,7 +81,7 @@ struct hapd_interfaces {
 #ifdef CONFIG_CTRL_IFACE_UDP
        unsigned char ctrl_iface_cookie[CTRL_IFACE_COOKIE_LEN];
 #endif /* CONFIG_CTRL_IFACE_UDP */
-
+	struct ubus_object ubus;
 };
 
 enum hostapd_chan_status {
@@ -154,6 +155,8 @@ struct hostapd_data {
 	struct hostapd_iface *iface;
 	struct hostapd_config *iconf;
 	struct hostapd_bss_config *conf;
+	struct hostapd_ubus_bss ubus;
+	char *config_id;
 	int interface_added; /* virtual interface added for this BSS */
 	unsigned int started:1;
 	unsigned int disabled:1;
@@ -602,7 +605,7 @@ struct hostapd_iface {
 int hostapd_for_each_interface(struct hapd_interfaces *interfaces,
 			       int (*cb)(struct hostapd_iface *iface,
 					 void *ctx), void *ctx);
-int hostapd_reload_config(struct hostapd_iface *iface);
+int hostapd_reload_config(struct hostapd_iface *iface, int reconf);
 void hostapd_reconfig_encryption(struct hostapd_data *hapd);
 struct hostapd_data *
 hostapd_alloc_bss_data(struct hostapd_iface *hapd_iface,
@@ -610,6 +613,7 @@ hostapd_alloc_bss_data(struct hostapd_iface *hapd_iface,
 		       struct hostapd_bss_config *bss);
 int hostapd_setup_interface(struct hostapd_iface *iface);
 int hostapd_setup_interface_complete(struct hostapd_iface *iface, int err);
+void hostapd_set_own_neighbor_report(struct hostapd_data *hapd);
 void hostapd_interface_deinit(struct hostapd_iface *iface);
 void hostapd_interface_free(struct hostapd_iface *iface);
 struct hostapd_iface * hostapd_alloc_iface(void);
@@ -644,6 +648,7 @@ void hostapd_cleanup_cs_params(struct hostapd_data *hapd);
 void hostapd_periodic_iface(struct hostapd_iface *iface);
 int hostapd_owe_trans_get_info(struct hostapd_data *hapd);
 void hostapd_ocv_check_csa_sa_query(void *eloop_ctx, void *timeout_ctx);
+int hostapd_check_max_sta(struct hostapd_data *hapd);
 
 /* utils.c */
 int hostapd_register_probereq_cb(struct hostapd_data *hapd,

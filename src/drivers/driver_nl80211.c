@@ -16,9 +16,6 @@
 #include <net/if.h>
 #include <netlink/genl/genl.h>
 #include <netlink/genl/ctrl.h>
-#ifdef CONFIG_LIBNL3_ROUTE
-#include <netlink/route/neighbour.h>
-#endif /* CONFIG_LIBNL3_ROUTE */
 #include <linux/rtnetlink.h>
 #include <netpacket/packet.h>
 #include <linux/errqueue.h>
@@ -2918,10 +2915,15 @@ static int wpa_driver_nl80211_del_beacon(struct i802_bss *bss)
 	struct nl_msg *msg;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
 
+	if (!bss->beacon_set)
+		return 0;
+
+	bss->beacon_set = 0;
+
 	wpa_printf(MSG_DEBUG, "nl80211: Remove beacon (ifindex=%d)",
-		   drv->ifindex);
+		   bss->ifindex);
 	nl80211_put_wiphy_data_ap(bss);
-	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_DEL_BEACON);
+	msg = nl80211_bss_msg(bss, 0, NL80211_CMD_DEL_BEACON);
 	return send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
 }
 
@@ -4815,6 +4817,9 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "nl80211: Beacon set failed: %d (%s)",
 			   ret, strerror(-ret));
+		if (!bss->beacon_set)
+			ret = 0;
+		bss->beacon_set = 0;
 	} else {
 		bss->beacon_set = 1;
 		nl80211_set_bss(bss, params->cts_protect, params->preamble,
@@ -4973,7 +4978,7 @@ static int nl80211_set_channel(struct i802_bss *bss,
 		   freq->freq, freq->ht_enabled, freq->vht_enabled, freq->he_enabled,
 		   freq->bandwidth, freq->center_freq1, freq->center_freq2);
 
-	msg = nl80211_drv_msg(drv, 0, set_chan ? NL80211_CMD_SET_CHANNEL :
+	msg = nl80211_bss_msg(bss, 0, set_chan ? NL80211_CMD_SET_CHANNEL :
 			      NL80211_CMD_SET_WIPHY);
 	if (!msg || nl80211_put_freq_params(msg, freq) < 0) {
 		nlmsg_free(msg);
@@ -5284,26 +5289,29 @@ fail:
 
 static void rtnl_neigh_delete_fdb_entry(struct i802_bss *bss, const u8 *addr)
 {
-#ifdef CONFIG_LIBNL3_ROUTE
 	struct wpa_driver_nl80211_data *drv = bss->drv;
-	struct rtnl_neigh *rn;
-	struct nl_addr *nl_addr;
+	struct ndmsg nhdr = {
+		.ndm_state = NUD_PERMANENT,
+		.ndm_ifindex = bss->ifindex,
+		.ndm_family = AF_BRIDGE,
+	};
+	struct nl_msg *msg;
 	int err;
 
-	rn = rtnl_neigh_alloc();
-	if (!rn)
+	msg = nlmsg_alloc_simple(RTM_DELNEIGH, NLM_F_CREATE);
+	if (!msg)
 		return;
 
-	rtnl_neigh_set_family(rn, AF_BRIDGE);
-	rtnl_neigh_set_ifindex(rn, bss->ifindex);
-	nl_addr = nl_addr_build(AF_BRIDGE, (void *) addr, ETH_ALEN);
-	if (!nl_addr) {
-		rtnl_neigh_put(rn);
-		return;
-	}
-	rtnl_neigh_set_lladdr(rn, nl_addr);
+	if (nlmsg_append(msg, &nhdr, sizeof(nhdr), NLMSG_ALIGNTO) < 0)
+		goto errout;
 
-	err = rtnl_neigh_delete(drv->rtnl_sk, rn, 0);
+	if (nla_put(msg, NDA_LLADDR, ETH_ALEN, (void *)addr))
+		goto errout;
+
+	if (nl_send_auto_complete(drv->rtnl_sk, msg) < 0)
+		goto errout;
+
+	err = nl_wait_for_ack(drv->rtnl_sk);
 	if (err < 0) {
 		wpa_printf(MSG_DEBUG, "nl80211: bridge FDB entry delete for "
 			   MACSTR " ifindex=%d failed: %s", MAC2STR(addr),
@@ -5313,9 +5321,8 @@ static void rtnl_neigh_delete_fdb_entry(struct i802_bss *bss, const u8 *addr)
 			   MACSTR, MAC2STR(addr));
 	}
 
-	nl_addr_put(nl_addr);
-	rtnl_neigh_put(rn);
-#endif /* CONFIG_LIBNL3_ROUTE */
+errout:
+	nlmsg_free(msg);
 }
 
 
@@ -5602,7 +5609,7 @@ static void nl80211_teardown_ap(struct i802_bss *bss)
 		nl80211_mgmt_unsubscribe(bss, "AP teardown");
 
 	nl80211_put_wiphy_data_ap(bss);
-	bss->beacon_set = 0;
+	wpa_driver_nl80211_del_beacon(bss);
 }
 
 
@@ -5946,7 +5953,7 @@ static int wpa_driver_nl80211_ibss(struct wpa_driver_nl80211_data *drv,
 				   struct wpa_driver_associate_params *params)
 {
 	struct nl_msg *msg;
-	int ret = -1;
+	int ret = -1, i;
 	int count = 0;
 
 	wpa_printf(MSG_DEBUG, "nl80211: Join IBSS (ifindex=%d)", drv->ifindex);
@@ -5972,6 +5979,37 @@ retry:
 	if (nl80211_put_freq_params(msg, &params->freq) < 0 ||
 	    nl80211_put_beacon_int(msg, params->beacon_int))
 		goto fail;
+
+	if (params->fixed_freq) {
+		wpa_printf(MSG_DEBUG, "  * fixed_freq");
+		nla_put_flag(msg, NL80211_ATTR_FREQ_FIXED);
+	}
+
+	if (params->beacon_int > 0) {
+		wpa_printf(MSG_DEBUG, "  * beacon_int=%d",
+			   params->beacon_int);
+		nla_put_u32(msg, NL80211_ATTR_BEACON_INTERVAL,
+			    params->beacon_int);
+	}
+
+	if (params->rates[0] > 0) {
+		wpa_printf(MSG_DEBUG, "  * basic_rates:");
+		i = 0;
+		while (i < NL80211_MAX_SUPP_RATES &&
+		       params->rates[i] > 0) {
+			wpa_printf(MSG_DEBUG, "    %.1f",
+				   (double)params->rates[i] / 2);
+			i++;
+		}
+		nla_put(msg, NL80211_ATTR_BSS_BASIC_RATES, i,
+			params->rates);
+	}
+
+	if (params->mcast_rate > 0) {
+		wpa_printf(MSG_DEBUG, "  * mcast_rate=%.1f",
+			   (double)params->mcast_rate / 10);
+		nla_put_u32(msg, NL80211_ATTR_MCAST_RATE, params->mcast_rate);
+	}
 
 	ret = nl80211_set_conn_keys(params, msg);
 	if (ret)
@@ -7691,7 +7729,6 @@ static void *i802_init(struct hostapd_data *hapd,
 	    (params->num_bridge == 0 || !params->bridge[0]))
 		add_ifidx(drv, br_ifindex, drv->ifindex);
 
-#ifdef CONFIG_LIBNL3_ROUTE
 	if (bss->added_if_into_bridge || bss->already_in_bridge) {
 		int err;
 
@@ -7708,7 +7745,6 @@ static void *i802_init(struct hostapd_data *hapd,
 			goto failed;
 		}
 	}
-#endif /* CONFIG_LIBNL3_ROUTE */
 
 	if (drv->capa.flags2 & WPA_DRIVER_FLAGS2_CONTROL_PORT_RX) {
 		wpa_printf(MSG_DEBUG,
@@ -8051,8 +8087,6 @@ static int wpa_driver_nl80211_if_remove(struct i802_bss *bss,
 	} else {
 		wpa_printf(MSG_DEBUG, "nl80211: First BSS - reassign context");
 		nl80211_teardown_ap(bss);
-		if (!bss->added_if && !drv->first_bss->next)
-			wpa_driver_nl80211_del_beacon(bss);
 		nl80211_destroy_bss(bss);
 		if (!bss->added_if)
 			i802_set_iface_flags(bss, 0);
@@ -8449,7 +8483,6 @@ static int wpa_driver_nl80211_deinit_ap(void *priv)
 	if (!is_ap_interface(drv->nlmode))
 		return -1;
 	wpa_driver_nl80211_del_beacon(bss);
-	bss->beacon_set = 0;
 
 	/*
 	 * If the P2P GO interface was dynamically added, then it is
@@ -8469,7 +8502,6 @@ static int wpa_driver_nl80211_stop_ap(void *priv)
 	if (!is_ap_interface(drv->nlmode))
 		return -1;
 	wpa_driver_nl80211_del_beacon(bss);
-	bss->beacon_set = 0;
 	return 0;
 }
 
@@ -9872,6 +9904,10 @@ static int nl80211_switch_channel(void *priv, struct csa_settings *settings)
 	if (ret)
 		goto error;
 
+	if (drv->nlmode == NL80211_IFTYPE_MESH_POINT) {
+		nla_put_flag(msg, NL80211_ATTR_HANDLE_DFS);
+	}
+
 	/* beacon_csa params */
 	beacon_csa = nla_nest_start(msg, NL80211_ATTR_CSA_IES);
 	if (!beacon_csa)
@@ -10440,6 +10476,18 @@ static int nl80211_put_mesh_id(struct nl_msg *msg, const u8 *mesh_id,
 }
 
 
+static int nl80211_put_mcast_rate(struct nl_msg *msg, int mcast_rate)
+{
+	if (mcast_rate > 0) {
+		wpa_printf(MSG_DEBUG, "  * mcast_rate=%.1f",
+			   (double)mcast_rate / 10);
+		return nla_put_u32(msg, NL80211_ATTR_MCAST_RATE, mcast_rate);
+	}
+
+	return 0;
+}
+
+
 static int nl80211_put_mesh_config(struct nl_msg *msg,
 				   struct wpa_driver_mesh_bss_params *params)
 {
@@ -10452,6 +10500,9 @@ static int nl80211_put_mesh_config(struct nl_msg *msg,
 	if (((params->flags & WPA_DRIVER_MESH_CONF_FLAG_AUTO_PLINKS) &&
 	     nla_put_u8(msg, NL80211_MESHCONF_AUTO_OPEN_PLINKS,
 			params->auto_plinks)) ||
+	    ((params->flags & WPA_DRIVER_MESH_CONF_FLAG_FORWARDING) &&
+	     nla_put_u8(msg, NL80211_MESHCONF_FORWARDING,
+			params->forwarding)) ||
 	    ((params->flags & WPA_DRIVER_MESH_CONF_FLAG_MAX_PEER_LINKS) &&
 	     nla_put_u16(msg, NL80211_MESHCONF_MAX_PEER_LINKS,
 			 params->max_peer_links)) ||
@@ -10498,6 +10549,7 @@ static int nl80211_join_mesh(struct i802_bss *bss,
 	    nl80211_put_basic_rates(msg, params->basic_rates) ||
 	    nl80211_put_mesh_id(msg, params->meshid, params->meshid_len) ||
 	    nl80211_put_beacon_int(msg, params->beacon_int) ||
+	    nl80211_put_mcast_rate(msg, params->mcast_rate) ||
 	    nl80211_put_dtim_period(msg, params->dtim_period))
 		goto fail;
 
@@ -10648,13 +10700,14 @@ static int wpa_driver_br_add_ip_neigh(void *priv, u8 version,
 				      const u8 *ipaddr, int prefixlen,
 				      const u8 *addr)
 {
-#ifdef CONFIG_LIBNL3_ROUTE
 	struct i802_bss *bss = priv;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
-	struct rtnl_neigh *rn;
-	struct nl_addr *nl_ipaddr = NULL;
-	struct nl_addr *nl_lladdr = NULL;
-	int family, addrsize;
+	struct ndmsg nhdr = {
+		.ndm_state = NUD_PERMANENT,
+		.ndm_ifindex = bss->br_ifindex,
+	};
+	struct nl_msg *msg;
+	int addrsize;
 	int res;
 
 	if (!ipaddr || prefixlen == 0 || !addr)
@@ -10673,85 +10726,66 @@ static int wpa_driver_br_add_ip_neigh(void *priv, u8 version,
 	}
 
 	if (version == 4) {
-		family = AF_INET;
+		nhdr.ndm_family = AF_INET;
 		addrsize = 4;
 	} else if (version == 6) {
-		family = AF_INET6;
+		nhdr.ndm_family = AF_INET6;
 		addrsize = 16;
 	} else {
 		return -EINVAL;
 	}
 
-	rn = rtnl_neigh_alloc();
-	if (rn == NULL)
+	msg = nlmsg_alloc_simple(RTM_NEWNEIGH, NLM_F_CREATE);
+	if (!msg)
 		return -ENOMEM;
 
-	/* set the destination ip address for neigh */
-	nl_ipaddr = nl_addr_build(family, (void *) ipaddr, addrsize);
-	if (nl_ipaddr == NULL) {
-		wpa_printf(MSG_DEBUG, "nl80211: nl_ipaddr build failed");
-		res = -ENOMEM;
+	res = -ENOMEM;
+	if (nlmsg_append(msg, &nhdr, sizeof(nhdr), NLMSG_ALIGNTO) < 0)
 		goto errout;
-	}
-	nl_addr_set_prefixlen(nl_ipaddr, prefixlen);
-	res = rtnl_neigh_set_dst(rn, nl_ipaddr);
-	if (res) {
-		wpa_printf(MSG_DEBUG,
-			   "nl80211: neigh set destination addr failed");
+
+	if (nla_put(msg, NDA_DST, addrsize, (void *)ipaddr))
 		goto errout;
-	}
 
-	/* set the corresponding lladdr for neigh */
-	nl_lladdr = nl_addr_build(AF_BRIDGE, (u8 *) addr, ETH_ALEN);
-	if (nl_lladdr == NULL) {
-		wpa_printf(MSG_DEBUG, "nl80211: neigh set lladdr failed");
-		res = -ENOMEM;
+	if (nla_put(msg, NDA_LLADDR, ETH_ALEN, (void *)addr))
 		goto errout;
-	}
-	rtnl_neigh_set_lladdr(rn, nl_lladdr);
 
-	rtnl_neigh_set_ifindex(rn, bss->br_ifindex);
-	rtnl_neigh_set_state(rn, NUD_PERMANENT);
+	res = nl_send_auto_complete(drv->rtnl_sk, msg);
+	if (res < 0)
+		goto errout;
 
-	res = rtnl_neigh_add(drv->rtnl_sk, rn, NLM_F_CREATE);
+	res = nl_wait_for_ack(drv->rtnl_sk);
 	if (res) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Adding bridge ip neigh failed: %s",
 			   nl_geterror(res));
 	}
 errout:
-	if (nl_lladdr)
-		nl_addr_put(nl_lladdr);
-	if (nl_ipaddr)
-		nl_addr_put(nl_ipaddr);
-	if (rn)
-		rtnl_neigh_put(rn);
+	nlmsg_free(msg);
 	return res;
-#else /* CONFIG_LIBNL3_ROUTE */
-	return -1;
-#endif /* CONFIG_LIBNL3_ROUTE */
 }
 
 
 static int wpa_driver_br_delete_ip_neigh(void *priv, u8 version,
 					 const u8 *ipaddr)
 {
-#ifdef CONFIG_LIBNL3_ROUTE
 	struct i802_bss *bss = priv;
 	struct wpa_driver_nl80211_data *drv = bss->drv;
-	struct rtnl_neigh *rn;
-	struct nl_addr *nl_ipaddr;
-	int family, addrsize;
+	struct ndmsg nhdr = {
+		.ndm_state = NUD_PERMANENT,
+		.ndm_ifindex = bss->br_ifindex,
+	};
+	struct nl_msg *msg;
+	int addrsize;
 	int res;
 
 	if (!ipaddr)
 		return -EINVAL;
 
 	if (version == 4) {
-		family = AF_INET;
+		nhdr.ndm_family = AF_INET;
 		addrsize = 4;
 	} else if (version == 6) {
-		family = AF_INET6;
+		nhdr.ndm_family = AF_INET6;
 		addrsize = 16;
 	} else {
 		return -EINVAL;
@@ -10769,41 +10803,30 @@ static int wpa_driver_br_delete_ip_neigh(void *priv, u8 version,
 		return -1;
 	}
 
-	rn = rtnl_neigh_alloc();
-	if (rn == NULL)
+	msg = nlmsg_alloc_simple(RTM_DELNEIGH, NLM_F_CREATE);
+	if (!msg)
 		return -ENOMEM;
 
-	/* set the destination ip address for neigh */
-	nl_ipaddr = nl_addr_build(family, (void *) ipaddr, addrsize);
-	if (nl_ipaddr == NULL) {
-		wpa_printf(MSG_DEBUG, "nl80211: nl_ipaddr build failed");
-		res = -ENOMEM;
+	res = -ENOMEM;
+	if (nlmsg_append(msg, &nhdr, sizeof(nhdr), NLMSG_ALIGNTO) < 0)
 		goto errout;
-	}
-	res = rtnl_neigh_set_dst(rn, nl_ipaddr);
-	if (res) {
-		wpa_printf(MSG_DEBUG,
-			   "nl80211: neigh set destination addr failed");
+
+	if (nla_put(msg, NDA_DST, addrsize, (void *)ipaddr))
 		goto errout;
-	}
 
-	rtnl_neigh_set_ifindex(rn, bss->br_ifindex);
+	res = nl_send_auto_complete(drv->rtnl_sk, msg);
+	if (res < 0)
+		goto errout;
 
-	res = rtnl_neigh_delete(drv->rtnl_sk, rn, 0);
+	res = nl_wait_for_ack(drv->rtnl_sk);
 	if (res) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Deleting bridge ip neigh failed: %s",
 			   nl_geterror(res));
 	}
 errout:
-	if (nl_ipaddr)
-		nl_addr_put(nl_ipaddr);
-	if (rn)
-		rtnl_neigh_put(rn);
+	nlmsg_free(msg);
 	return res;
-#else /* CONFIG_LIBNL3_ROUTE */
-	return -1;
-#endif /* CONFIG_LIBNL3_ROUTE */
 }
 
 

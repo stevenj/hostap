@@ -823,6 +823,12 @@ void handle_probe_req(struct hostapd_data *hapd,
 	u16 csa_offs[2];
 	size_t csa_offs_len;
 	struct radius_sta rad_info;
+	struct hostapd_ubus_request req = {
+		.type = HOSTAPD_UBUS_PROBE_REQ,
+		.mgmt_frame = mgmt,
+		.ssi_signal = ssi_signal,
+		.elems = &elems,
+	};
 
 	if (hapd->iconf->rssi_ignore_probe_request && ssi_signal &&
 	    ssi_signal < hapd->iconf->rssi_ignore_probe_request)
@@ -1009,6 +1015,12 @@ void handle_probe_req(struct hostapd_data *hapd,
 	}
 #endif /* CONFIG_P2P */
 
+	if (hostapd_ubus_handle_event(hapd, &req)) {
+		wpa_printf(MSG_DEBUG, "Probe request for " MACSTR " rejected by ubus handler.\n",
+		       MAC2STR(mgmt->sa));
+		return;
+	}
+
 	/* TODO: verify that supp_rates contains at least one matching rate
 	 * with AP configuration */
 
@@ -1027,7 +1039,7 @@ void handle_probe_req(struct hostapd_data *hapd,
 	if (hapd->conf->no_probe_resp_if_max_sta &&
 	    is_multicast_ether_addr(mgmt->da) &&
 	    is_multicast_ether_addr(mgmt->bssid) &&
-	    hapd->num_sta >= hapd->conf->max_num_sta &&
+	    hostapd_check_max_sta(hapd) &&
 	    !ap_get_sta(hapd, mgmt->sa)) {
 		wpa_printf(MSG_MSGDUMP, "%s: Ignore Probe Request from " MACSTR
 			   " since no room for additional STA",
@@ -1755,11 +1767,6 @@ int ieee802_11_set_beacon(struct hostapd_data *hapd)
 
 	if (!hapd->drv_priv) {
 		wpa_printf(MSG_ERROR, "Interface is disabled");
-		return -1;
-	}
-
-	if (hapd->csa_in_progress) {
-		wpa_printf(MSG_ERROR, "Cannot set beacons during CSA period");
 		return -1;
 	}
 

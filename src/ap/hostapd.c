@@ -115,6 +115,28 @@ static void hostapd_reload_bss(struct hostapd_data *hapd)
 #endif /* CONFIG_NO_RADIUS */
 
 	ssid = &hapd->conf->ssid;
+
+	hostapd_set_freq(hapd, hapd->iconf->hw_mode, hapd->iface->freq,
+			 hapd->iconf->channel,
+			 hapd->iconf->enable_edmg,
+			 hapd->iconf->edmg_channel,
+			 hapd->iconf->ieee80211n,
+			 hapd->iconf->ieee80211ac,
+			 hapd->iconf->ieee80211ax,
+			 hapd->iconf->secondary_channel,
+			 hostapd_get_oper_chwidth(hapd->iconf),
+			 hostapd_get_oper_centr_freq_seg0_idx(hapd->iconf),
+			 hostapd_get_oper_centr_freq_seg1_idx(hapd->iconf));
+
+	if (hapd->iface->current_mode) {
+		if (hostapd_prepare_rates(hapd->iface, hapd->iface->current_mode)) {
+			wpa_printf(MSG_ERROR, "Failed to prepare rates table.");
+			hostapd_logger(hapd, NULL, HOSTAPD_MODULE_IEEE80211,
+				       HOSTAPD_LEVEL_WARNING,
+				       "Failed to prepare rates table.");
+		}
+	}
+
 	if (!ssid->wpa_psk_set && ssid->wpa_psk && !ssid->wpa_psk->next &&
 	    ssid->wpa_passphrase_set && ssid->wpa_passphrase) {
 		/*
@@ -197,6 +219,10 @@ static int hostapd_iface_conf_changed(struct hostapd_config *newconf,
 {
 	size_t i;
 
+	if (newconf->config_id != oldconf->config_id)
+		if (strcmp(newconf->config_id, oldconf->config_id))
+			return 1;
+
 	if (newconf->num_bss != oldconf->num_bss)
 		return 1;
 
@@ -210,12 +236,37 @@ static int hostapd_iface_conf_changed(struct hostapd_config *newconf,
 }
 
 
-int hostapd_reload_config(struct hostapd_iface *iface)
+static inline int hostapd_iface_num_sta(struct hostapd_iface *iface)
+{
+	int num_sta = 0;
+	int i;
+
+	for (i = 0; i < iface->num_bss; i++)
+		num_sta += iface->bss[i]->num_sta;
+
+	return num_sta;
+}
+
+
+int hostapd_check_max_sta(struct hostapd_data *hapd)
+{
+	if (hapd->num_sta >= hapd->conf->max_num_sta)
+		return 1;
+
+	if (hapd->iconf->max_num_sta &&
+	    hostapd_iface_num_sta(hapd->iface) >= hapd->iconf->max_num_sta)
+		return 1;
+
+	return 0;
+}
+
+int hostapd_reload_config(struct hostapd_iface *iface, int reconf)
 {
 	struct hapd_interfaces *interfaces = iface->interfaces;
 	struct hostapd_data *hapd = iface->bss[0];
 	struct hostapd_config *newconf, *oldconf;
 	size_t j;
+	int i;
 
 	if (iface->config_fname == NULL) {
 		/* Only in-memory config in use - assume it has been updated */
@@ -232,12 +283,15 @@ int hostapd_reload_config(struct hostapd_iface *iface)
 	if (newconf == NULL)
 		return -1;
 
-	hostapd_clear_old(iface);
-
 	oldconf = hapd->iconf;
 	if (hostapd_iface_conf_changed(newconf, oldconf)) {
 		char *fname;
 		int res;
+
+		if (reconf)
+			return -1;
+
+		hostapd_clear_old(iface);
 
 		wpa_printf(MSG_DEBUG,
 			   "Configuration changes include interface/BSS modification - force full disable+enable sequence");
@@ -263,27 +317,47 @@ int hostapd_reload_config(struct hostapd_iface *iface)
 			wpa_printf(MSG_ERROR,
 				   "Failed to enable interface on config reload");
 		return res;
+	} else {
+		for (j = 0; j < iface->num_bss; j++) {
+			hapd = iface->bss[j];
+			if (!hapd->config_id || strcmp(hapd->config_id, newconf->bss[j]->config_id)) {
+				hostapd_flush_old_stations(iface->bss[j],
+							   WLAN_REASON_PREV_AUTH_NOT_VALID);
+#ifdef CONFIG_WEP
+				hostapd_broadcast_wep_clear(iface->bss[j]);
+#endif
+
+#ifndef CONFIG_NO_RADIUS
+				/* TODO: update dynamic data based on changed configuration
+				 * items (e.g., open/close sockets, etc.) */
+				radius_client_flush(iface->bss[j]->radius, 0);
+#endif /* CONFIG_NO_RADIUS */
+				wpa_printf(MSG_INFO, "bss %zu changed", j);
+			}
+		}
 	}
 	iface->conf = newconf;
 
+	for (i = 0; i < iface->num_hw_features; i++) {
+		struct hostapd_hw_modes *mode = &iface->hw_features[i];
+		if (mode->mode == iface->conf->hw_mode) {
+			iface->current_mode = mode;
+			break;
+		}
+	}
+
+	if (iface->conf->channel)
+		iface->freq = hostapd_hw_get_freq(hapd, iface->conf->channel);
+
 	for (j = 0; j < iface->num_bss; j++) {
 		hapd = iface->bss[j];
+		if (hapd->config_id) {
+			os_free(hapd->config_id);
+			hapd->config_id = NULL;
+		}
+		if (newconf->bss[j]->config_id)
+			hapd->config_id = strdup(newconf->bss[j]->config_id);
 		hapd->iconf = newconf;
-		hapd->iconf->channel = oldconf->channel;
-		hapd->iconf->acs = oldconf->acs;
-		hapd->iconf->secondary_channel = oldconf->secondary_channel;
-		hapd->iconf->ieee80211n = oldconf->ieee80211n;
-		hapd->iconf->ieee80211ac = oldconf->ieee80211ac;
-		hapd->iconf->ht_capab = oldconf->ht_capab;
-		hapd->iconf->vht_capab = oldconf->vht_capab;
-		hostapd_set_oper_chwidth(hapd->iconf,
-					 hostapd_get_oper_chwidth(oldconf));
-		hostapd_set_oper_centr_freq_seg0_idx(
-			hapd->iconf,
-			hostapd_get_oper_centr_freq_seg0_idx(oldconf));
-		hostapd_set_oper_centr_freq_seg1_idx(
-			hapd->iconf,
-			hostapd_get_oper_centr_freq_seg1_idx(oldconf));
 		hapd->conf = newconf->bss[j];
 		hostapd_reload_bss(hapd);
 	}
@@ -377,6 +451,7 @@ void hostapd_free_hapd_data(struct hostapd_data *hapd)
 	hapd->beacon_set_done = 0;
 
 	wpa_printf(MSG_DEBUG, "%s(%s)", __func__, hapd->conf->iface);
+	hostapd_ubus_free_bss(hapd);
 	accounting_deinit(hapd);
 	hostapd_deinit_wpa(hapd);
 	vlan_deinit(hapd);
@@ -1340,6 +1415,7 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 		wpa_printf(MSG_ERROR, "GAS server initialization failed");
 		return -1;
 	}
+#endif /* CONFIG_INTERWORKING */
 
 	if (conf->qos_map_set_len &&
 	    hostapd_drv_set_qos_map(hapd, conf->qos_map_set,
@@ -1347,7 +1423,6 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 		wpa_printf(MSG_ERROR, "Failed to initialize QoS Map");
 		return -1;
 	}
-#endif /* CONFIG_INTERWORKING */
 
 	if (conf->bss_load_update_period && bss_load_update_init(hapd)) {
 		wpa_printf(MSG_ERROR, "BSS Load initialization failed");
@@ -1402,6 +1477,8 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 
 	if (hapd->driver && hapd->driver->set_operstate)
 		hapd->driver->set_operstate(hapd->drv_priv, 1);
+
+	hostapd_ubus_add_bss(hapd);
 
 	return 0;
 }
@@ -2009,6 +2086,7 @@ static int hostapd_setup_interface_complete_sync(struct hostapd_iface *iface,
 	if (err)
 		goto fail;
 
+	hostapd_ubus_add_iface(iface);
 	wpa_printf(MSG_DEBUG, "Completing interface initialization");
 	if (iface->freq) {
 #ifdef NEED_AP_MLME
@@ -2206,6 +2284,7 @@ dfs_offload:
 
 fail:
 	wpa_printf(MSG_ERROR, "Interface initialization failed");
+	hostapd_ubus_free_iface(iface);
 	hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 	wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
 #ifdef CONFIG_FST
@@ -2373,6 +2452,10 @@ hostapd_alloc_bss_data(struct hostapd_iface *hapd_iface,
 	hapd->iconf = conf;
 	hapd->conf = bss;
 	hapd->iface = hapd_iface;
+	if (bss && bss->config_id)
+		hapd->config_id = strdup(bss->config_id);
+	else
+		hapd->config_id = NULL;
 	if (conf)
 		hapd->driver = conf->driver;
 	hapd->ctrl_sock = -1;
@@ -2681,6 +2764,7 @@ void hostapd_interface_deinit_free(struct hostapd_iface *iface)
 		   (unsigned int) iface->conf->num_bss);
 	driver = iface->bss[0]->driver;
 	drv_priv = iface->bss[0]->drv_priv;
+	hostapd_ubus_free_iface(iface);
 	hostapd_interface_deinit(iface);
 	wpa_printf(MSG_DEBUG, "%s: driver=%p drv_priv=%p -> hapd_deinit",
 		   __func__, driver, drv_priv);
@@ -3431,7 +3515,7 @@ static int hostapd_change_config_freq(struct hostapd_data *hapd,
 				      struct hostapd_freq_params *old_params)
 {
 	int channel;
-	u8 seg0, seg1;
+	u8 seg0 = 0, seg1 = 0;
 	struct hostapd_hw_modes *mode;
 
 	if (!params->channel) {

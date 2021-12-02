@@ -2535,8 +2535,6 @@ void wnm_bss_keep_alive_deinit(struct wpa_supplicant *wpa_s)
 }
 
 
-#ifdef CONFIG_INTERWORKING
-
 static int wpas_qos_map_set(struct wpa_supplicant *wpa_s, const u8 *qos_map,
 			    size_t len)
 {
@@ -2568,8 +2566,6 @@ static void interworking_process_assoc_resp(struct wpa_supplicant *wpa_s,
 				 elems.qos_map_set_len);
 	}
 }
-
-#endif /* CONFIG_INTERWORKING */
 
 
 static void multi_ap_process_assoc_resp(struct wpa_supplicant *wpa_s,
@@ -2704,10 +2700,8 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
 		wnm_process_assoc_resp(wpa_s, data->assoc_info.resp_ies,
 				       data->assoc_info.resp_ies_len);
 #endif /* CONFIG_WNM */
-#ifdef CONFIG_INTERWORKING
 		interworking_process_assoc_resp(wpa_s, data->assoc_info.resp_ies,
 						data->assoc_info.resp_ies_len);
-#endif /* CONFIG_INTERWORKING */
 		if (wpa_s->hw_capab == CAPAB_VHT &&
 		    get_ie(data->assoc_info.resp_ies,
 			   data->assoc_info.resp_ies_len, WLAN_EID_VHT_CAP))
@@ -4665,8 +4659,62 @@ static void wpas_event_unprot_beacon(struct wpa_supplicant *wpa_s,
 }
 
 
-void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
-			  union wpa_event_data *data)
+static void
+supplicant_ch_switch_started(struct wpa_supplicant *wpa_s,
+			    union wpa_event_data *data)
+{
+	char buf[256];
+	size_t len = sizeof(buf);
+	char *cmd = NULL;
+	int width = 20;
+	int ret;
+
+	if (!wpa_s->hostapd)
+		return;
+
+	wpa_msg(wpa_s, MSG_INFO, WPA_EVENT_CHANNEL_SWITCH
+		"count=%d freq=%d ht_enabled=%d ch_offset=%d ch_width=%s cf1=%d cf2=%d",
+		data->ch_switch.count,
+		data->ch_switch.freq,
+		data->ch_switch.ht_enabled,
+		data->ch_switch.ch_offset,
+		channel_width_to_string(data->ch_switch.ch_width),
+		data->ch_switch.cf1,
+		data->ch_switch.cf2);
+
+	switch (data->ch_switch.ch_width) {
+	case CHAN_WIDTH_20_NOHT:
+	case CHAN_WIDTH_20:
+		width = 20;
+		break;
+	case CHAN_WIDTH_40:
+		width = 40;
+		break;
+	case CHAN_WIDTH_80:
+		width = 80;
+		break;
+	case CHAN_WIDTH_160:
+	case CHAN_WIDTH_80P80:
+		width = 160;
+		break;
+	}
+
+	asprintf(&cmd, "CHAN_SWITCH %d %d sec_channel_offset=%d center_freq1=%d center_freq2=%d, bandwidth=%d auto-ht\n",
+		data->ch_switch.count - 1,
+		data->ch_switch.freq,
+		data->ch_switch.ch_offset,
+		data->ch_switch.cf1,
+		data->ch_switch.cf2,
+		width);
+	ret = wpa_ctrl_request(wpa_s->hostapd, cmd, os_strlen(cmd), buf, &len, NULL);
+	free(cmd);
+
+	if (ret < 0)
+		wpa_printf(MSG_ERROR, "\nFailed to reload hostapd AP interfaces\n");
+}
+
+void supplicant_event(void *ctx, enum wpa_event_type event,
+		      union wpa_event_data *data)
 {
 	struct wpa_supplicant *wpa_s = ctx;
 	int resched;
@@ -4980,8 +5028,10 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 			channel_width_to_string(data->ch_switch.ch_width),
 			data->ch_switch.cf1,
 			data->ch_switch.cf2);
-		if (event == EVENT_CH_SWITCH_STARTED)
+		if (event == EVENT_CH_SWITCH_STARTED) {
+			supplicant_ch_switch_started(wpa_s, data);
 			break;
+		}
 
 		wpa_s->assoc_freq = data->ch_switch.freq;
 		wpa_s->current_ssid->frequency = data->ch_switch.freq;
@@ -5511,7 +5561,7 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 }
 
 
-void wpa_supplicant_event_global(void *ctx, enum wpa_event_type event,
+void supplicant_event_global(void *ctx, enum wpa_event_type event,
 				 union wpa_event_data *data)
 {
 	struct wpa_supplicant *wpa_s;
